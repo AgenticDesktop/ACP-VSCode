@@ -1,0 +1,602 @@
+// SPDX-License-Identifier: Apache-2.0
+import {
+  ToolCall,
+  ToolCallUpdate,
+  type ToolCallStatus,
+  type ToolKind,
+} from "@agentclientprotocol/sdk";
+import * as vscode from "vscode";
+import * as path from "path";
+import { currentWorkspaceRoot } from "./types";
+
+const INSERT_CHAT_TEXT_COMMAND = "acp.insertChatText";
+
+/**
+ * Builds a markdown link that, when clicked, pre-fills the VS Code chat input
+ * with the given command text without sending it.
+ *
+ * @param label The display text for the link
+ * @param commandText The text to pre-fill in the chat input
+ * @returns A markdown link string using the `command:` URI scheme
+ */
+export function makeCommandLink(label: string, commandText: string): string {
+  const args = encodeURIComponent(JSON.stringify([commandText]));
+  return `[${label}](command:${INSERT_CHAT_TEXT_COMMAND}?${args})`;
+}
+
+/**
+ * Creates a `MarkdownString` with the given content that has the
+ * `acp.insertChatText` command trusted, enabling inline `command:` links
+ * produced by {@link makeCommandLink} to be clickable in chat responses.
+ *
+ * @param content The markdown content string (may include command: links)
+ * @returns A trusted `MarkdownString` for use with `ChatResponseStream.markdown()`
+ */
+export function trustedCommandMarkdown(content: string): vscode.MarkdownString {
+  const md = new vscode.MarkdownString(content);
+  md.isTrusted = { enabledCommands: [INSERT_CHAT_TEXT_COMMAND] };
+  return md;
+}
+
+const DEFAULT_TERMINAL_LANGUAGE = "shell";
+
+export type ToolInfo = {
+  toolCallId: string;
+  name: string;
+  kind: ToolKind | "terminal";
+  input?: string;
+  output?: string;
+  resources?: vscode.Uri[];
+};
+
+type ToolQuestionPayloadOption = {
+  label?: unknown;
+  description?: unknown;
+};
+
+type ToolQuestionPayload = {
+  question?: unknown;
+  header?: unknown;
+  options?: unknown;
+};
+
+type ToolQuestionPayloadContainer = {
+  questions?: unknown;
+};
+
+export function getToolInfo(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+): ToolInfo {
+  const response: ToolInfo = {
+    toolCallId: toolCallUpdate.toolCallId,
+    name: toolCallUpdate.title || "",
+    kind: toolCallUpdate.kind || "terminal",
+  };
+
+  if (
+    toolCallUpdate.status === "in_progress" ||
+    toolCallUpdate.status === "pending"
+  ) {
+    if (
+      toolCallUpdate.rawInput &&
+      typeof toolCallUpdate.rawInput === "object" &&
+      "command" in toolCallUpdate.rawInput &&
+      Array.isArray(toolCallUpdate.rawInput.command)
+    ) {
+      response.input = toolCallUpdate.rawInput.command.join(" ");
+    } else {
+      toolCallUpdate.content
+        ?.filter((c) => c.type === "content")
+        .map((c) => c.content)
+        .filter((c) => c.type === "text")
+        .reduce((acc, curr) => {
+          response.input = acc + curr.text;
+          return response.input;
+        }, "");
+    }
+    if (response.name === "" && response.input) {
+      const firstLine = response.input.split("\n")[0];
+      response.name =
+        firstLine.length > 30 ? firstLine.substring(0, 30) + "..." : firstLine;
+    }
+  } else {
+    if (
+      toolCallUpdate.rawOutput &&
+      typeof toolCallUpdate.rawOutput === "object"
+    ) {
+      if (
+        "command" in toolCallUpdate.rawOutput &&
+        Array.isArray(toolCallUpdate.rawOutput.command)
+      ) {
+        response.input = toolCallUpdate.rawOutput.command.join(" ");
+        if (response.name === "") {
+          const firstLine = response.input.split("\n")[0];
+          response.name =
+            firstLine.length > 30
+              ? firstLine.substring(0, 30) + "..."
+              : firstLine;
+        }
+      }
+
+      if (
+        "formatted_output" in toolCallUpdate.rawOutput &&
+        typeof toolCallUpdate.rawOutput.formatted_output === "string"
+      ) {
+        response.output = toolCallUpdate.rawOutput.formatted_output;
+      } else if (
+        "aggregated_output" in toolCallUpdate.rawOutput &&
+        typeof toolCallUpdate.rawOutput.aggregated_output === "string"
+      ) {
+        response.output = toolCallUpdate.rawOutput.aggregated_output;
+      } else if (
+        "output" in toolCallUpdate.rawOutput &&
+        typeof toolCallUpdate.rawOutput.output === "string"
+      ) {
+        response.output = toolCallUpdate.rawOutput.output;
+      } else {
+        response.output = `${JSON.stringify(toolCallUpdate.rawOutput, null, 2)}`;
+      }
+    } else {
+      toolCallUpdate.content
+        ?.filter((c) => c.type === "content")
+        .map((c) => c.content)
+        .filter((c) => c.type === "text")
+        .reduce((acc, curr) => {
+          response.output = acc + curr.text;
+          return response.output;
+        }, "");
+    }
+  }
+
+  // extract locations
+  if (toolCallUpdate.locations) {
+    const workspaceRoot = currentWorkspaceRoot();
+    const resources = toolCallUpdate.locations
+      .map((l) => l.path)
+      .map((p) => resolveUri(p, workspaceRoot));
+    response.resources = resources;
+  }
+
+  return response;
+}
+
+type ToolCommandPayload = {
+  command?: unknown;
+};
+
+function getCommandLine(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const { command } = raw as ToolCommandPayload;
+  if (!Array.isArray(command)) {
+    return undefined;
+  }
+  const parts = command.filter((part) => typeof part === "string") as string[];
+  if (!parts.length) {
+    return undefined;
+  }
+  return parts.join(" ");
+}
+
+export function getSubAgentInvocationId(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+): string | undefined {
+  const meta = toolCallUpdate._meta;
+  if (!meta || typeof meta !== "object") {
+    return undefined;
+  }
+  const { subAgentInvocationId } = meta as { subAgentInvocationId?: unknown };
+  return typeof subAgentInvocationId === "string"
+    ? subAgentInvocationId
+    : undefined;
+}
+
+export function isTerminalToolInvocation(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+  info: ToolInfo,
+): boolean {
+  return (
+    info.kind === "execute" ||
+    Boolean(getCommandLine(toolCallUpdate.rawInput)) ||
+    Boolean(getCommandLine(toolCallUpdate.rawOutput))
+  );
+}
+
+export function buildTerminalToolInvocationData(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+  info: ToolInfo,
+): vscode.ChatTerminalToolInvocationData | undefined {
+  const commandLine =
+    getCommandLine(toolCallUpdate.rawInput) ||
+    getCommandLine(toolCallUpdate.rawOutput) ||
+    info.input;
+  if (!commandLine) {
+    return undefined;
+  }
+
+  const data: vscode.ChatTerminalToolInvocationData = {
+    language: DEFAULT_TERMINAL_LANGUAGE,
+    commandLine: {
+      original: commandLine,
+    },
+  };
+
+  if (info.output) {
+    data.output = { text: info.output };
+  }
+
+  if (
+    toolCallUpdate.rawOutput &&
+    typeof toolCallUpdate.rawOutput === "object"
+  ) {
+    const rawOutput = toolCallUpdate.rawOutput as {
+      exitCode?: unknown;
+      duration?: unknown;
+    };
+    const exitCode =
+      typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;
+    const duration =
+      typeof rawOutput.duration === "number" ? rawOutput.duration : undefined;
+    if (exitCode !== undefined || duration !== undefined) {
+      data.state = { exitCode, duration };
+    }
+  }
+
+  return data;
+}
+
+export function buildMcpToolInvocationData(
+  info: ToolInfo,
+): vscode.ChatMcpToolInvocationData | undefined {
+  if (!info.input && !info.output) {
+    return undefined;
+  }
+
+  const output: vscode.McpToolInvocationContentData[] = [];
+  if (info.output) {
+    const encoder = new TextEncoder();
+    output.push({
+      data: encoder.encode(info.output),
+      mimeType: "text/plain",
+    });
+  }
+
+  return {
+    input: info.input ?? "",
+    output,
+  };
+}
+
+function getQuestionPayload(raw: unknown): ToolQuestionPayload[] | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const { questions } = raw as ToolQuestionPayloadContainer;
+  if (!Array.isArray(questions)) {
+    return undefined;
+  }
+  return questions.filter(
+    (question) => question && typeof question === "object",
+  ) as ToolQuestionPayload[] | undefined;
+}
+
+function formatQuestionOptionLabel(
+  label: string,
+  description: string | undefined,
+): string {
+  if (!description) {
+    return label;
+  }
+  return `${label} — ${description}`;
+}
+
+/**
+ * Parses question data from a tool call update and builds ChatQuestion objects.
+ * @param toolCallUpdate The tool call update containing question data
+ * @returns Array of ChatQuestion objects, or undefined if no valid questions found
+ */
+export function parseQuestions(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+): vscode.ChatQuestion[] | undefined {
+  const rawQuestions =
+    getQuestionPayload(toolCallUpdate.rawInput) ??
+    getQuestionPayload(toolCallUpdate.rawOutput);
+  if (!rawQuestions || rawQuestions.length === 0) {
+    return undefined;
+  }
+
+  const questions: vscode.ChatQuestion[] = [];
+  rawQuestions.forEach((questionPayload, index) => {
+    const header =
+      typeof questionPayload.header === "string"
+        ? questionPayload.header.trim()
+        : "";
+    const questionText =
+      typeof questionPayload.question === "string"
+        ? questionPayload.question.trim()
+        : "";
+    const title = header || questionText || "Question";
+    const message = header && questionText ? questionText : undefined;
+
+    const rawOptions = Array.isArray(questionPayload.options)
+      ? (questionPayload.options as ToolQuestionPayloadOption[])
+      : [];
+    const options: vscode.ChatQuestionOption[] = [];
+    rawOptions.forEach((option, optionIndex) => {
+      const label = typeof option.label === "string" ? option.label.trim() : "";
+      if (!label) {
+        return;
+      }
+      const description =
+        typeof option.description === "string"
+          ? option.description.trim()
+          : undefined;
+      options.push({
+        id: `${toolCallUpdate.toolCallId}-q${index}-o${optionIndex}`,
+        label: formatQuestionOptionLabel(label, description),
+        value: label,
+      });
+    });
+
+    const hasOptions = options.length > 0;
+    const allowFreeformInput = hasOptions
+      ? options.some((option) =>
+          typeof option.value === "string"
+            ? option.value.toLowerCase() === "other"
+            : false,
+        )
+      : true;
+    const questionType = hasOptions
+      ? vscode.ChatQuestionType.SingleSelect
+      : vscode.ChatQuestionType.Text;
+
+    questions.push(
+      new vscode.ChatQuestion(
+        `${toolCallUpdate.toolCallId}-q${index}`,
+        questionType,
+        title,
+        {
+          ...(message ? { message } : {}),
+          ...(hasOptions ? { options } : {}),
+          allowFreeformInput,
+        },
+      ),
+    );
+  });
+
+  return questions.length > 0 ? questions : undefined;
+}
+
+export function buildQuestionCarouselPart(
+  toolCallUpdate: ToolCallUpdate | ToolCall,
+): vscode.ChatResponseQuestionCarouselPart | undefined {
+  const questions = parseQuestions(toolCallUpdate);
+  if (!questions) {
+    return undefined;
+  }
+
+  return new vscode.ChatResponseQuestionCarouselPart(questions, true);
+}
+
+export function buildDiffMarkdown(
+  path: string,
+  oldText: string | undefined,
+  newText: string | undefined,
+): vscode.MarkdownString | undefined {
+  const diffBody = toInlineDiff(oldText ?? "", newText ?? "");
+  if (!diffBody) {
+    return undefined;
+  }
+
+  const diffMarkdown = new vscode.MarkdownString();
+  diffMarkdown.appendMarkdown("**");
+  diffMarkdown.appendText(path);
+  diffMarkdown.appendMarkdown("**\n\n");
+  diffMarkdown.appendCodeblock(diffBody, "diff");
+  return diffMarkdown;
+}
+
+export function toInlineDiff(oldText: string, newText: string): string {
+  const normalize = (text: string): string => text.replace(/\r\n?/g, "\n");
+  const original = normalize(oldText);
+  const updated = normalize(newText);
+
+  if (original === updated) {
+    return "";
+  }
+
+  const oldLines = original.split("\n");
+  const newLines = updated.split("\n");
+  const m = oldLines.length;
+  const n = newLines.length;
+
+  const lcs = Array.from({ length: m + 1 }, () =>
+    new Array<number>(n + 1).fill(0),
+  );
+
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldLines[i] === newLines[j]) {
+        lcs[i][j] = lcs[i + 1][j + 1] + 1;
+      } else {
+        lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+  }
+
+  type DiffOp = { type: "common" | "add" | "remove"; line: string };
+  const script: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      script.push({ type: "common", line: oldLines[i] });
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      script.push({ type: "remove", line: oldLines[i] });
+      i++;
+    } else {
+      script.push({ type: "add", line: newLines[j] });
+      j++;
+    }
+  }
+
+  while (i < m) {
+    script.push({ type: "remove", line: oldLines[i] });
+    i++;
+  }
+  while (j < n) {
+    script.push({ type: "add", line: newLines[j] });
+    j++;
+  }
+
+  const hasChanges = script.some((part) => part.type !== "common");
+  if (!hasChanges) {
+    return "";
+  }
+
+  const diffLines: string[] = ["--- original", "+++ modified"];
+  const oldStart = m > 0 ? 1 : 0;
+  const newStart = n > 0 ? 1 : 0;
+  diffLines.push(`@@ -${oldStart},${m} +${newStart},${n} @@`);
+
+  for (const part of script) {
+    const prefix =
+      part.type === "add" ? "+" : part.type === "remove" ? "-" : " ";
+    diffLines.push(`${prefix}${part.line}`);
+  }
+
+  return diffLines.join("\n");
+}
+
+const FILE_SCHEME_REGEX = /^file:\/+?/i;
+const SCHEME_REGEX = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const WINDOWS_DRIVE_REGEX = /^[a-zA-Z]:[\\/]/;
+
+export function normalizeDiffPath(input: string): string {
+  // Strip an explicit file: scheme if present, but preserve absolute/relative form
+  return input ? input.replace(FILE_SCHEME_REGEX, "") : input;
+}
+
+function isWindowsDrivePath(value: string): boolean {
+  return WINDOWS_DRIVE_REGEX.test(value);
+}
+
+function splitPathSegments(value: string): string[] {
+  return path.normalize(value).split(path.sep).filter(Boolean);
+}
+
+function getWorkspaceRelativePath(
+  workspaceRoot: vscode.Uri | undefined,
+  absPath: string,
+): string | undefined {
+  if (!workspaceRoot?.fsPath) {
+    return undefined;
+  }
+  const relative = path.relative(workspaceRoot.fsPath, absPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return undefined;
+  }
+  return relative;
+}
+
+function toWorkspaceUriOrFile(
+  absPath: string,
+  workspaceRoot: vscode.Uri | undefined,
+): vscode.Uri {
+  const relative = getWorkspaceRelativePath(workspaceRoot, absPath);
+  if (relative && workspaceRoot) {
+    return vscode.Uri.joinPath(workspaceRoot, ...splitPathSegments(relative));
+  }
+  return vscode.Uri.file(absPath);
+}
+
+export function resolveUri(
+  inputPath: string,
+  workspaceRoot: vscode.Uri | undefined,
+): vscode.Uri {
+  const raw = (inputPath ?? "").trim();
+
+  // If it has an explicit scheme (file:, http:, vscode-remote:, etc.) and is not
+  // a Windows drive letter, parse as a URI.
+  if (SCHEME_REGEX.test(raw) && !isWindowsDrivePath(raw)) {
+    try {
+      const parsed = vscode.Uri.parse(raw);
+      if (parsed.scheme !== "file") {
+        return parsed;
+      }
+      if (parsed.fsPath) {
+        return toWorkspaceUriOrFile(parsed.fsPath, workspaceRoot);
+      }
+      return parsed;
+    } catch {
+      // fall through to other resolution strategies
+    }
+  }
+
+  // Remove any leading file: prefix left over and normalize the path string
+  const cleaned = normalizeDiffPath(raw);
+
+  // If the cleaned path is absolute on this platform, treat it as an absolute file path
+  if (path.isAbsolute(cleaned) || isWindowsDrivePath(cleaned)) {
+    return toWorkspaceUriOrFile(path.normalize(cleaned), workspaceRoot);
+  }
+
+  // Otherwise treat as a workspace-relative path when a workspace root is available
+  if (workspaceRoot) {
+    return vscode.Uri.joinPath(workspaceRoot, ...splitPathSegments(cleaned));
+  }
+
+  // Last resort: resolve relative to the current working directory
+  return vscode.Uri.file(path.resolve(cleaned));
+}
+
+export function buildDiffStats(
+  oldText: string | undefined,
+  newText: string | undefined,
+): { added: number; removed: number } {
+  const normalize = (text: string): string => text.replace(/\r\n?/g, "\n");
+  const original = normalize(oldText ?? "");
+  const updated = normalize(newText ?? "");
+  if (original === updated) {
+    return { added: 0, removed: 0 };
+  }
+  const oldLines = original.split("\n");
+  const newLines = updated.split("\n");
+  const m = oldLines.length;
+  const n = newLines.length;
+  const lcs = Array.from({ length: m + 1 }, () =>
+    new Array<number>(n + 1).fill(0),
+  );
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldLines[i] === newLines[j]) {
+        lcs[i][j] = lcs[i + 1][j + 1] + 1;
+      } else {
+        lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+  }
+  let i = 0;
+  let j = 0;
+  let removed = 0;
+  let added = 0;
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      removed++;
+      i++;
+    } else {
+      added++;
+      j++;
+    }
+  }
+  removed += m - i;
+  added += n - j;
+  return { added, removed };
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out-test",
+    "noEmit": false
+  },
+  "include": [
+    "test/**/*.ts",
+    "typings/**/*.d.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    ".reference"
+  ]
+}

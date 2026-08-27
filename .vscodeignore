@@ -1,0 +1,15 @@
+.reference/**
+typings/**
+test/**
+out-test/**
+node_modules/**
+.trae/**
+.vscode/**
+.dts/**
+esbuild.js
+tsconfig.json
+tsconfig.test.json
+node_modules/.cache/**
+.gitignore
+**/*.map
+**/*.ts

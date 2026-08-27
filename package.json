@@ -1,0 +1,328 @@
+{
+  "name": "acp-agent-harness",
+  "publisher": "shihaoshen",
+  "displayName": "ACP Agent Harness",
+  "version": "0.1.0",
+  "description": "Bridge ACP (Agent Client Protocol) agents into VS Code chat sessions",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "type": "commonjs",
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "enabledApiProposals": [
+    "chatSessionsProvider",
+    "chatParticipantPrivate",
+    "chatParticipantAdditions",
+    "chatProvider"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "acp-gemini",
+        "displayName": "Gemini CLI [ACP]"
+      },
+      {
+        "vendor": "acp-opencode",
+        "displayName": "OpenCode [ACP]"
+      },
+      {
+        "vendor": "acp-cagent",
+        "displayName": "Cagent [ACP]"
+      },
+      {
+        "vendor": "acp-codex",
+        "displayName": "Codex [ACP]"
+      },
+      {
+        "vendor": "acp-claude",
+        "displayName": "Claude Code [ACP]"
+      },
+      {
+        "vendor": "acp-qwen",
+        "displayName": "Qwen Code [ACP]"
+      },
+      {
+        "vendor": "acp-custom1",
+        "displayName": "Custom ACP Agent 1"
+      },
+      {
+        "vendor": "acp-custom2",
+        "displayName": "Custom ACP Agent 2"
+      },
+      {
+        "vendor": "acp-custom3",
+        "displayName": "Custom ACP Agent 3"
+      },
+      {
+        "vendor": "acp-custom4",
+        "displayName": "Custom ACP Agent 4"
+      },
+      {
+        "vendor": "acp-default",
+        "when": "!github.copilot-chat.activated"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "acp-gemini",
+        "fullName": "Gemini CLI [ACP]",
+        "name": "acp-gemini",
+        "description": "Chat sessions backed by the Gemini CLI ACP agent",
+        "when": "config.acpHarness.agents.gemini.enabled"
+      },
+      {
+        "id": "acp-opencode",
+        "fullName": "OpenCode [ACP]",
+        "name": "acp-opencode",
+        "description": "Chat sessions backed by the OpenCode ACP agent",
+        "when": "config.acpHarness.agents.opencode.enabled"
+      },
+      {
+        "id": "acp-cagent",
+        "fullName": "Cagent [ACP]",
+        "name": "acp-cagent",
+        "description": "Chat sessions backed by the Cagent ACP agent",
+        "when": "config.acpHarness.agents.cagent.enabled"
+      },
+      {
+        "id": "acp-codex",
+        "fullName": "Codex [ACP]",
+        "name": "acp-codex",
+        "description": "Chat sessions backed by the Codex ACP agent",
+        "when": "config.acpHarness.agents.codex.enabled"
+      },
+      {
+        "id": "acp-claude",
+        "fullName": "Claude Code [ACP]",
+        "name": "acp-claude",
+        "description": "Chat sessions backed by the Claude Code ACP agent",
+        "when": "config.acpHarness.agents.claude.enabled"
+      },
+      {
+        "id": "acp-qwen",
+        "fullName": "Qwen Code [ACP]",
+        "name": "acp-qwen",
+        "description": "Chat sessions backed by the Qwen Code ACP agent",
+        "when": "config.acpHarness.agents.qwen.enabled"
+      },
+      {
+        "id": "acp-custom1",
+        "fullName": "Custom ACP Agent 1",
+        "name": "acp-custom1",
+        "description": "Manually configured ACP agent slot 1",
+        "when": "config.acpHarness.agents.custom1.enabled"
+      },
+      {
+        "id": "acp-custom2",
+        "fullName": "Custom ACP Agent 2",
+        "name": "acp-custom2",
+        "description": "Manually configured ACP agent slot 2",
+        "when": "config.acpHarness.agents.custom2.enabled"
+      },
+      {
+        "id": "acp-custom3",
+        "fullName": "Custom ACP Agent 3",
+        "name": "acp-custom3",
+        "description": "Manually configured ACP agent slot 3",
+        "when": "config.acpHarness.agents.custom3.enabled"
+      },
+      {
+        "id": "acp-custom4",
+        "fullName": "Custom ACP Agent 4",
+        "name": "acp-custom4",
+        "description": "Manually configured ACP agent slot 4",
+        "when": "config.acpHarness.agents.custom4.enabled"
+      }
+    ],
+    "chatSessions": [
+      {
+        "name": "gemini",
+        "type": "acp-gemini",
+        "displayName": "Gemini CLI [ACP]",
+        "description": "Chat sessions backed by the Gemini CLI ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.gemini.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "opencode",
+        "type": "acp-opencode",
+        "displayName": "OpenCode [ACP]",
+        "description": "Chat sessions backed by the OpenCode ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.opencode.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "cagent",
+        "type": "acp-cagent",
+        "displayName": "Cagent [ACP]",
+        "description": "Chat sessions backed by the Cagent ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.cagent.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "codex",
+        "type": "acp-codex",
+        "displayName": "Codex [ACP]",
+        "description": "Chat sessions backed by the Codex (via codex-acp) ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.codex.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "claude",
+        "type": "acp-claude",
+        "displayName": "Claude Code [ACP]",
+        "description": "Chat sessions backed by the Claude Code ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.claude.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "qwen",
+        "type": "acp-qwen",
+        "displayName": "Qwen Code [ACP]",
+        "description": "Chat sessions backed by the Qwen Code ACP agent",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.qwen.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "custom1",
+        "type": "acp-custom1",
+        "displayName": "Custom ACP Agent 1",
+        "description": "Manually configured ACP agent slot 1",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.custom1.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "custom2",
+        "type": "acp-custom2",
+        "displayName": "Custom ACP Agent 2",
+        "description": "Manually configured ACP agent slot 2",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.custom2.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "custom3",
+        "type": "acp-custom3",
+        "displayName": "Custom ACP Agent 3",
+        "description": "Manually configured ACP agent slot 3",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.custom3.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      },
+      {
+        "name": "custom4",
+        "type": "acp-custom4",
+        "displayName": "Custom ACP Agent 4",
+        "description": "Manually configured ACP agent slot 4",
+        "icon": "$(hubot)",
+        "when": "config.acpHarness.agents.custom4.enabled",
+        "capabilities": {
+          "supportsFileAttachments": true
+        }
+      }
+    ],
+    "configuration": {
+      "title": "ACP Agent Harness",
+      "properties": {
+        "acpHarness.agents": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per-slot ACP agent launch configuration. Each key is a slot id (gemini, opencode, cagent, codex, claude, qwen, custom1..custom4) and each value describes how to launch that ACP agent. `title` is the display name (falls back to the slot id); `command` is the executable that launches the ACP agent; `enabled` must be explicitly set to `true` for the agent to show up in the harness list.\n\nExample:\n\n```\n\"acpHarness.agents\": {\"gemini\": {\"title\":\"Gemini CLI\",\"command\":\"gemini\",\"args\":[\"--experimental-acp\"],\"enabled\":true}}\n```\n\nAlso available: OpenCode (`\"command\": \"opencode\", \"args\": [\"acp\"]`) and Cagent (`\"command\": \"cagent\", \"args\": [\"acp\"]`).",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "title": {
+                "type": "string",
+                "markdownDescription": "Display name for the agent; falls back to the slot id when omitted."
+              },
+              "description": {
+                "type": "string",
+                "markdownDescription": "Optional human-readable description of the agent."
+              },
+              "command": {
+                "type": "string",
+                "markdownDescription": "Executable that launches the ACP agent."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "markdownDescription": "Command-line arguments passed to the agent executable."
+              },
+              "cwd": {
+                "type": "string",
+                "markdownDescription": "Working directory in which the agent is launched."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "markdownDescription": "Additional environment variables for the agent process."
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "markdownDescription": "Must be explicitly set to `true` for the agent to appear in the harness list."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc -p ./ --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"out-test/test/*.test.js\"",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vscode/vsce": "^3.7.0",
+    "esbuild": "^0.27.0",
+    "typescript": "^5.9.0"
+  }
+}

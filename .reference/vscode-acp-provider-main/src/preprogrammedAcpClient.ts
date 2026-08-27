@@ -1,0 +1,484 @@
+// SPDX-License-Identifier: Apache-2.0
+import {
+  AgentCapabilities,
+  Client,
+  ContentBlock,
+  ListSessionsResponse,
+  LoadSessionResponse,
+  NewSessionResponse,
+  PromptResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionConfigOption,
+  SessionInfo,
+  SessionModelState,
+  SessionModeState,
+  SessionNotification,
+  ToolCallUpdate,
+} from "@agentclientprotocol/sdk";
+import * as vscode from "vscode";
+import { AgentRegistryEntry } from "./agentRegistry";
+import { DisposableBase } from "./disposables";
+import { AcpClient, AcpPermissionHandler } from "./acpClient";
+
+const STREAM_DELAY_MS = 500;
+const DEFAULT_STOP_RESPONSE: PromptResponse = { stopReason: "end_turn" };
+
+type NotificationSequence = ReadonlyArray<
+  SessionNotification & { execute?: () => Promise<void> }
+>;
+type NotificationPhase = keyof PromptNotificationPlan;
+
+type NotificationSource = NotificationSequence | PromptNotificationPlan;
+
+export interface PromptNotificationPlan {
+  readonly prompt?: NotificationSequence;
+  readonly permissionAllowed?: NotificationSequence;
+  readonly permissionDenied?: NotificationSequence;
+}
+
+export interface PreprogrammedPermissionConfig {
+  readonly title: string;
+  readonly rawInput?: {
+    readonly command?: string[];
+    readonly [key: string]: unknown;
+  };
+  readonly toolCall?: Partial<ToolCallUpdate>;
+  readonly options?: Array<import("@agentclientprotocol/sdk").PermissionOption>;
+}
+
+export interface PreprogrammedPromptProgram {
+  readonly promptText: string;
+  readonly notifications?: NotificationSource;
+  readonly response?: PromptResponse;
+  readonly permission?: PreprogrammedPermissionConfig;
+}
+
+export interface PreprogrammedSessionConfig {
+  readonly sessionId: string;
+  readonly cwd?: string;
+  readonly label?: string;
+  readonly models?: SessionModelState;
+  readonly modes?: SessionModeState;
+  readonly configOptions?: SessionConfigOption[];
+  /** Per-model config options. When a model is selected, its config options replace the current ones. */
+  readonly modelConfigOptions?: Record<string, SessionConfigOption[]>;
+}
+
+export interface PreprogrammedConfig {
+  readonly agent?: AgentRegistryEntry;
+  readonly agentCapabilities?: AgentCapabilities;
+  readonly session: PreprogrammedSessionConfig;
+  readonly promptPrograms?: Array<PreprogrammedPromptProgram>;
+  readonly permissionHandler: AcpPermissionHandler;
+  readonly sessionToResume: PreprogrammedSessionConfig & {
+    turns: NotificationSequence;
+  };
+}
+
+class PreprogrammedAcpClient extends DisposableBase implements AcpClient {
+  private readonly onSessionUpdateEmitter = this._register(
+    new vscode.EventEmitter<SessionNotification>(),
+  );
+  public readonly onSessionUpdate: vscode.Event<SessionNotification> =
+    this.onSessionUpdateEmitter.event;
+
+  private readonly _onDidStop = this._register(new vscode.EventEmitter<void>());
+  public readonly onDidStop: vscode.Event<void> = this._onDidStop.event;
+
+  private readonly _onDidStart = this._register(
+    new vscode.EventEmitter<void>(),
+  );
+  public readonly onDidStart: vscode.Event<void> = this._onDidStart.event;
+
+  private readonly _onDidOptionsChanged = this._register(
+    new vscode.EventEmitter<void>(),
+  );
+  public readonly onDidOptionsChanged: vscode.Event<void> =
+    this._onDidOptionsChanged.event;
+
+  private readonly promptPrograms = new Map<
+    string,
+    PreprogrammedPromptProgram
+  >();
+  private readonly agentCapabilities?: AgentCapabilities;
+  private readonly permissionHandler: AcpPermissionHandler;
+
+  private readonly sessionId: string;
+  private readonly label: string;
+  private cwd: string;
+  private readonly models?: SessionModelState;
+  private modes?: SessionModeState;
+  private configOptions: SessionConfigOption[];
+  private sessionCreated = false;
+  private currentProgram?: PreprogrammedPromptProgram;
+  private pendingQuestionResolve?: () => void;
+
+  constructor(private readonly config: PreprogrammedConfig) {
+    super();
+    this.agentCapabilities = config.agentCapabilities;
+    this.permissionHandler = config.permissionHandler;
+
+    const sessionConfig = config.session;
+    this.sessionId = sessionConfig.sessionId;
+    this.cwd = sessionConfig.cwd ?? "";
+    this.label = sessionConfig.label ?? this.sessionId;
+    this.models = sessionConfig.models;
+    this.modes = sessionConfig.modes;
+    this.configOptions = [...(sessionConfig.configOptions ?? [])];
+
+    for (const program of config.promptPrograms ?? []) {
+      const key = this.normalizePrompt(program.promptText);
+      this.promptPrograms.set(key, program);
+    }
+  }
+
+  async ensureReady(): Promise<void> {
+    this._onDidStart.fire();
+    return Promise.resolve();
+  }
+
+  getCapabilities(): AgentCapabilities {
+    return this.agentCapabilities || {};
+  }
+
+  async createSession(
+    cwd: string,
+    _mcpServers: AgentRegistryEntry["mcpServers"],
+  ): Promise<NewSessionResponse> {
+    await this.ensureReady();
+
+    if (!this.sessionCreated) {
+      this.sessionCreated = true;
+      if (!this.cwd) {
+        this.cwd = cwd;
+      }
+    }
+
+    this._onDidOptionsChanged.fire();
+
+    return {
+      sessionId: this.sessionId,
+      models: this.models,
+      modes: this.modes,
+      configOptions: this.configOptions,
+    } satisfies NewSessionResponse;
+  }
+
+  async loadSession(
+    sessionId: string,
+    _cwd: string,
+    _mcpServers: AgentRegistryEntry["mcpServers"],
+  ): Promise<{
+    modeId: string | undefined;
+    modelId: string | undefined;
+    notifications: SessionNotification[];
+  }> {
+    await this.ensureReady();
+    if (sessionId !== this.config.sessionToResume.sessionId) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+
+    this._onDidOptionsChanged.fire();
+    return {
+      modeId: this.config.sessionToResume.modes?.currentModeId,
+      modelId: this.config.sessionToResume.models?.currentModelId,
+      notifications: [...this.config.sessionToResume.turns],
+    };
+  }
+
+  async prompt(
+    sessionId: string,
+    promptBlocks: ContentBlock[],
+  ): Promise<PromptResponse> {
+    await this.ensureReady();
+    if (sessionId !== this.sessionId) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+
+    const normalizedPrompt = this.normalizePrompt(
+      this.extractPromptText(promptBlocks),
+    );
+    const program = this.promptPrograms.get(normalizedPrompt);
+    if (!program) {
+      throw new Error(
+        `No preprogrammed response for prompt: "${normalizedPrompt}"`,
+      );
+    }
+
+    this.currentProgram = program;
+
+    if (this.currentProgram.permission) {
+      const permission = this.currentProgram.permission;
+      const toolCall: ToolCallUpdate = {
+        ...permission.toolCall,
+        toolCallId:
+          permission.toolCall?.toolCallId ?? "preprogrammed-tool-call",
+        title: permission.toolCall?.title ?? permission.title,
+        rawInput: permission.toolCall?.rawInput ?? permission.rawInput,
+      };
+      const response = await this.requestPermission({
+        options: permission.options ?? [
+          {
+            kind: "allow_always",
+            name: "Allow",
+            optionId: "allow",
+          },
+          {
+            kind: "reject_always",
+            name: "Reject",
+            optionId: "deny",
+          },
+        ],
+        sessionId: this.sessionId,
+        toolCall,
+      });
+
+      if (response.outcome.outcome === "selected") {
+        const plan = program.notifications as PromptNotificationPlan;
+        const selectedOutcome = response.outcome as {
+          outcome: "selected";
+          optionId: string;
+        };
+        const allOptions = permission.options ?? [
+          { kind: "allow_always", name: "Allow", optionId: "allow" },
+          { kind: "reject_always", name: "Reject", optionId: "deny" },
+        ];
+        const selectedOption = allOptions.find(
+          (o) => o.optionId === selectedOutcome.optionId,
+        );
+        const isRejected = selectedOption?.kind.startsWith("reject") ?? false;
+        if (!isRejected) {
+          await this.streamNotificationPlan(plan, "permissionAllowed");
+        } else {
+          await this.streamNotificationPlan(plan, "permissionDenied");
+        }
+      } else {
+        throw new Error("Permission request was not completed");
+      }
+    } else {
+      // Check if this program contains a question
+      const hasQuestion = this.programHasQuestion(program);
+
+      if (hasQuestion) {
+        // Stream the question notifications
+        await this.streamNotificationPlan(program.notifications, "prompt");
+
+        // Wait for the question to be answered
+        await new Promise<void>((resolve) => {
+          this.pendingQuestionResolve = resolve;
+        });
+      } else {
+        // Normal flow without questions
+        await this.streamNotificationPlan(program.notifications, "prompt");
+      }
+    }
+    return program.response ?? DEFAULT_STOP_RESPONSE;
+  }
+
+  async cancel(_sessionId: string): Promise<void> {
+    return;
+  }
+
+  async requestPermission(
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    return this.permissionHandler.requestPermission(request);
+  }
+
+  async sessionUpdate(notification: SessionNotification): Promise<void> {
+    const update = notification.update;
+    if (update.sessionUpdate === "current_mode_update" && this.modes) {
+      this.modes = { ...this.modes, currentModeId: update.currentModeId };
+      this._onDidOptionsChanged.fire();
+    }
+    this.onSessionUpdateEmitter.fire(this.ensureSessionId(notification));
+  }
+
+  async changeMode(_sessionId: string, _modeId: string): Promise<void> {
+    return;
+  }
+
+  async changeModel(_sessionId: string, modelId: string): Promise<void> {
+    const modelConfigOptions = this.config.session.modelConfigOptions;
+    if (modelConfigOptions) {
+      this.configOptions = [...(modelConfigOptions[modelId] ?? [])];
+      this._onDidOptionsChanged.fire();
+    }
+  }
+
+  async setSessionConfigOption(
+    _sessionId: string,
+    configId: string,
+    value: string,
+  ): Promise<void> {
+    this.configOptions = this.configOptions.map((o) =>
+      o.id === configId ? { ...o, currentValue: value } : o,
+    );
+    this._onDidOptionsChanged.fire();
+  }
+
+  getConfigOptions(): SessionConfigOption[] {
+    return this.configOptions;
+  }
+
+  async sendQuestionAnswers(
+    sessionId: string,
+    toolCallId: string,
+    answers: Record<string, unknown>,
+  ): Promise<void> {
+    if (sessionId !== this.sessionId) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+
+    // Extract the first answer value to determine which answer handler to trigger
+    const answerValues = Object.values(answers);
+    if (answerValues.length === 0) {
+      return;
+    }
+
+    const selectedAnswer = answerValues[0] as string;
+    const answerPromptKey = `answer:${selectedAnswer}`;
+    const normalizedKey = this.normalizePrompt(answerPromptKey);
+
+    const answerProgram = this.promptPrograms.get(normalizedKey);
+    if (answerProgram) {
+      // Stream the answer response notifications
+      await this.streamNotificationPlan(answerProgram.notifications, "prompt");
+    }
+
+    // Resolve the pending question promise to continue the turn
+    if (this.pendingQuestionResolve) {
+      this.pendingQuestionResolve();
+      this.pendingQuestionResolve = undefined;
+    }
+  }
+
+  async listNativeSessions(_cursor?: string): Promise<ListSessionsResponse> {
+    return { sessions: [] };
+  }
+
+  dispose(): void {
+    this.onSessionUpdateEmitter.dispose();
+    this._onDidStop.dispose();
+    super.dispose();
+  }
+
+  private async streamNotificationPlan(
+    plan: NotificationSource | undefined,
+    phase: NotificationPhase,
+  ): Promise<void> {
+    if (!plan) {
+      return;
+    }
+
+    if (Array.isArray(plan)) {
+      if (phase === "prompt") {
+        await this.streamNotifications(plan);
+      }
+      return;
+    }
+
+    const notifications = (plan as PromptNotificationPlan)[phase];
+    if (!notifications) {
+      return;
+    }
+
+    await this.streamNotifications(notifications);
+  }
+
+  getSupportedModeState(): SessionModeState | null {
+    return this.modes || null;
+  }
+
+  getSupportedModelState(): SessionModelState | null {
+    return this.models || null;
+  }
+
+  private async streamNotifications(
+    notifications: NotificationSequence,
+  ): Promise<void> {
+    for (const notification of notifications) {
+      await this.delay(STREAM_DELAY_MS);
+      this.onSessionUpdateEmitter.fire(this.ensureSessionId(notification));
+      if (notification.execute) {
+        await notification.execute();
+      }
+    }
+  }
+
+  private ensureSessionId(
+    notification: SessionNotification,
+  ): SessionNotification {
+    if (notification.sessionId) {
+      return notification;
+    }
+    return { ...notification, sessionId: this.sessionId };
+  }
+
+  private programHasQuestion(program: PreprogrammedPromptProgram): boolean {
+    if (!program.notifications) {
+      return false;
+    }
+
+    // Check if notifications is an array or a plan
+    let notificationList: NotificationSequence | undefined;
+    if (Array.isArray(program.notifications)) {
+      notificationList = program.notifications;
+    } else {
+      notificationList = (program.notifications as PromptNotificationPlan)
+        .prompt;
+    }
+
+    if (!notificationList) {
+      return false;
+    }
+
+    // Check if any notification contains a question in rawInput
+    return notificationList.some((notification: SessionNotification) => {
+      const update = notification.update;
+      if (
+        update.sessionUpdate === "tool_call_update" &&
+        "rawInput" in update &&
+        update.rawInput &&
+        typeof update.rawInput === "object" &&
+        "questions" in update.rawInput
+      ) {
+        return true;
+      }
+      return false;
+    });
+  }
+
+  private normalizePrompt(input: string): string {
+    return input.trim().replace(/\s+/g, " ");
+  }
+
+  private extractPromptText(blocks: ContentBlock[]): string {
+    const pieces: string[] = [];
+    for (const block of blocks.reverse()) {
+      if (
+        block.type === "text" &&
+        block.text &&
+        block.text.startsWith("User: ")
+      ) {
+        pieces.push(block.text.substring("User: ".length).trim());
+        break;
+      }
+    }
+    if (pieces.length === 0) {
+      return "";
+    }
+    return pieces.join("\n");
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
+
+export function createPreprogrammedAcpClient(
+  config: PreprogrammedConfig,
+): AcpClient {
+  return new PreprogrammedAcpClient(config);
+}
